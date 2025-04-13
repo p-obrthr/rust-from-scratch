@@ -1,5 +1,6 @@
 mod lib;
 use lib::ThreadPool;
+use std::fs;
 use std::io::Read;
 use std::io::Write;
 use std::net::TcpListener;
@@ -28,48 +29,118 @@ fn main() {
 }
 
 fn handle_connection(mut _stream: TcpStream) {
+    let args: Vec<String> = std::env::args().collect();
+    let directory = if args.len() >= 3 && args[1] == "--directory" {
+        &args[2]
+    } else {
+        "."
+    };
+
     let mut buffer = [0; 256];
     let bytes = _stream.read(&mut buffer).unwrap();
     let request = String::from_utf8_lossy(&buffer[..bytes]);
     // println!("{}", request);
-    let request_parts = request.split("\r\n").collect::<Vec<&str>>();
 
-    let request_line = request_parts[0];
-    //println!("{request_line}");
-    let request_line_parts = request_line.split(" ").collect::<Vec<&str>>();
-    let requested_path = request_line_parts[1];
-    let requested_path_edited = &requested_path[1..];
+    let mut main_parts = request.splitn(2, "\r\n\r\n");
+    let headers = main_parts.next().unwrap_or("");
+    let req_body = main_parts.next().unwrap_or("");
+
+    let header_parts = headers.split("\r\n").collect::<Vec<&str>>();
+    let req_line = header_parts[0].split(" ").collect::<Vec<&str>>();
+
+    let method = req_line[0];
+    let req_path = req_line[1];
+    let req_path_edited = &req_path[1..];
 
     // let host_header = request_parts[1];
-    let user_agent = request_parts[2];
-    let user_agent_parts = user_agent.split(" ").collect::<Vec<&str>>();
     let mut user_agent_kind = String::new();
-    if user_agent_parts.len() > 1 {
-        user_agent_kind = user_agent_parts[1].to_string();
+    let mut host = String::new();
+    let mut accept = String::new();
+    let mut req_content_type = String::new();
+    let mut req_content_len: usize = 0;
+
+    for part in &header_parts {
+        let headers = part.split(" ").collect::<Vec<&str>>();
+        match headers[0].to_lowercase().as_str() {
+            "host:" => {
+                host = headers[1].to_string();
+            }
+            "user-agent:" => {
+                user_agent_kind = headers[1].to_string();
+            }
+            "accept:" => {
+                accept = headers[1].to_string();
+            }
+            "content-type:" => {
+                req_content_type = headers[1].to_string();
+            }
+            "content-length:" => {
+                req_content_len = headers[1].parse::<usize>().unwrap();
+            }
+            _ => {}
+        }
     }
-    println!("{user_agent_kind}");
 
-    // let accept = request_collection[3];
-
-    // println!("{requested_path}");
-    // let paths = ["/", "", "echo"];
-    let mut response_body = String::new();
+    let mut resp_body = String::new();
     let mut status_code = 200;
     let mut reason_phrase = "OK";
 
-    let requested_path_parts = requested_path_edited.split("/").collect::<Vec<&str>>();
-    if !requested_path_parts.is_empty() {
-        println!("{}", requested_path_parts[0]);
+    let mut resp_content_kind = "text/plain";
 
-        match requested_path_parts[0] {
+    let req_path_parts = req_path_edited.split("/").collect::<Vec<&str>>();
+    if !req_path_parts.is_empty() {
+        //println!("{}", requested_path_parts[0]);
+
+        match req_path_parts[0] {
             "echo" => {
-                if requested_path_parts.len() > 1 {
-                    response_body.push_str(requested_path_parts[1]);
+                if req_path_parts.len() > 1 {
+                    resp_body.push_str(req_path_parts[1]);
                 }
             }
             "" => {}
             "user-agent" => {
-                response_body.push_str(&user_agent_kind);
+                resp_body.push_str(&user_agent_kind);
+            }
+            "files" => {
+                if req_path_parts.len() > 1 {
+                    let file_path = format!("{}/{}", directory, req_path_parts[1]);
+                    if method == "POST" {
+                        let result = fs::write(&file_path, req_body);
+                        match result {
+                            Ok(_result) => {
+                                status_code = 201;
+                                reason_phrase = "Created";
+                            }
+                            Err(e) => {
+                                status_code = 500;
+                                reason_phrase = "Internal Server Error";
+                                println!("err: {e}");
+                            }
+                        }
+                    } //println!("In file {file_path}");
+                    let contents: Result<Vec<u8>, std::io::Error> = fs::read(file_path);
+                    match contents {
+                        Ok(mut bytes) => {
+                            if bytes.ends_with(&[b'\n']) {
+                                bytes.pop();
+                            }
+                            //println!("bytes:\n{:?}", bytes);
+                            //println!("{}", bytes.len());
+
+                            resp_content_kind = if req_path_parts[1].ends_with(".html") {
+                                "text/html"
+                            } else {
+                                "application/octet-stream"
+                            };
+                            resp_body.push_str(&String::from_utf8_lossy(&bytes));
+                        }
+                        Err(e) => {
+                            status_code = 404;
+                            reason_phrase = "Not Found";
+                            println!("err: {e}");
+                        }
+                    }
+                }
             }
             _ => {
                 status_code = 404;
@@ -80,16 +151,15 @@ fn handle_connection(mut _stream: TcpStream) {
     // println!("{}", requested_path_parts[0]);
     let http_version = "HTTP/1.1";
 
-    let content_type = "Content-Type: text/plain";
-    let content_length = if response_body.is_empty() {
-        "Content-Length: 0".to_string()
+    let resp_content_len = if resp_body.is_empty() {
+        0
     } else {
-        format!("Content-Length: {}", response_body.len())
+        resp_body.len()
     };
 
     let response = format!(
-        "{} {} {}\r\n{}\r\n{}\r\n\r\n{}",
-        http_version, status_code, reason_phrase, content_type, content_length, response_body
+        "{} {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n{}",
+        http_version, status_code, reason_phrase, resp_content_kind, resp_content_len, resp_body
     );
 
     let _ = _stream.write(response.as_bytes());
