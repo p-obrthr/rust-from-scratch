@@ -1,5 +1,10 @@
 mod lib;
-use lib::ThreadPool;
+mod response;
+mod statuscode;
+
+use crate::lib::ThreadPool;
+use crate::response::{ContentType, Response};
+use crate::statuscode::StatusCode;
 use std::fs;
 use std::io::Read;
 use std::io::Write;
@@ -52,115 +57,129 @@ fn handle_connection(mut _stream: TcpStream) {
     let req_path = req_line[1];
     let req_path_edited = &req_path[1..];
 
-    // let host_header = request_parts[1];
     let mut user_agent_kind = String::new();
     let mut host = String::new();
     let mut accept = String::new();
     let mut req_content_type = String::new();
     let mut req_content_len: usize = 0;
 
-    for part in &header_parts {
+    parse_headers(
+        &header_parts,
+        &mut user_agent_kind,
+        &mut host,
+        &mut accept,
+        &mut req_content_type,
+        &mut req_content_len,
+    );
+
+    let response = process_request(
+        method,
+        req_path_edited,
+        &user_agent_kind,
+        req_body,
+        directory,
+    );
+
+    let _ = _stream.write(response.format_string().as_bytes());
+}
+
+fn parse_headers(
+    header_parts: &[&str],
+    user_agent_kind: &mut String,
+    host: &mut String,
+    accept: &mut String,
+    req_content_type: &mut String,
+    req_content_len: &mut usize,
+) {
+    for part in header_parts {
         let headers = part.split(" ").collect::<Vec<&str>>();
         match headers[0].to_lowercase().as_str() {
             "host:" => {
-                host = headers[1].to_string();
+                *host = headers[1].to_string();
             }
             "user-agent:" => {
-                user_agent_kind = headers[1].to_string();
+                *user_agent_kind = headers[1].to_string();
             }
             "accept:" => {
-                accept = headers[1].to_string();
+                *accept = headers[1].to_string();
             }
             "content-type:" => {
-                req_content_type = headers[1].to_string();
+                *req_content_type = headers[1].to_string();
             }
             "content-length:" => {
-                req_content_len = headers[1].parse::<usize>().unwrap();
+                *req_content_len = headers[1].parse::<usize>().unwrap();
             }
             _ => {}
         }
     }
+}
 
-    let mut resp_body = String::new();
-    let mut status_code = 200;
-    let mut reason_phrase = "OK";
+fn process_request(
+    method: &str,
+    path: &str,
+    user_agent: &str,
+    body: &str,
+    directory: &str,
+) -> Response {
+    let req_path_parts = path.split("/").collect::<Vec<&str>>();
 
-    let mut resp_content_kind = "text/plain";
+    if req_path_parts.is_empty() {
+        return Response::new(StatusCode::Ok, ContentType::TextPlain, "");
+    }
 
-    let req_path_parts = req_path_edited.split("/").collect::<Vec<&str>>();
-    if !req_path_parts.is_empty() {
-        //println!("{}", requested_path_parts[0]);
-
-        match req_path_parts[0] {
-            "echo" => {
-                if req_path_parts.len() > 1 {
-                    resp_body.push_str(req_path_parts[1]);
-                }
+    match req_path_parts[0] {
+        "echo" => {
+            if req_path_parts.len() > 1 {
+                Response::new(StatusCode::Ok, ContentType::TextPlain, req_path_parts[1])
+            } else {
+                Response::new(StatusCode::NotFound, ContentType::TextPlain, "")
             }
-            "" => {}
-            "user-agent" => {
-                resp_body.push_str(&user_agent_kind);
-            }
-            "files" => {
-                if req_path_parts.len() > 1 {
-                    let file_path = format!("{}/{}", directory, req_path_parts[1]);
-                    if method == "POST" {
-                        let result = fs::write(&file_path, req_body);
-                        match result {
-                            Ok(_result) => {
-                                status_code = 201;
-                                reason_phrase = "Created";
-                            }
-                            Err(e) => {
-                                status_code = 500;
-                                reason_phrase = "Internal Server Error";
-                                println!("err: {e}");
-                            }
-                        }
-                    } //println!("In file {file_path}");
-                    let contents: Result<Vec<u8>, std::io::Error> = fs::read(file_path);
-                    match contents {
-                        Ok(mut bytes) => {
-                            if bytes.ends_with(&[b'\n']) {
-                                bytes.pop();
-                            }
-                            //println!("bytes:\n{:?}", bytes);
-                            //println!("{}", bytes.len());
-
-                            resp_content_kind = if req_path_parts[1].ends_with(".html") {
-                                "text/html"
-                            } else {
-                                "application/octet-stream"
-                            };
-                            resp_body.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        "" => Response::new(StatusCode::Ok, ContentType::TextPlain, ""),
+        "user-agent" => Response::new(StatusCode::Ok, ContentType::TextPlain, user_agent),
+        "files" => {
+            if req_path_parts.len() < 2 {
+                Response::new(StatusCode::NotFound, ContentType::TextPlain, "")
+            } else {
+                let file_path = format!("{}/{}", directory, req_path_parts[1]);
+                if method == "POST" {
+                    let result = fs::write(&file_path, body);
+                    match result {
+                        Ok(_result) => {
+                            Response::new(StatusCode::Created, ContentType::TextPlain, "")
                         }
                         Err(e) => {
-                            status_code = 404;
-                            reason_phrase = "Not Found";
                             println!("err: {e}");
+                            Response::new(
+                                StatusCode::InternalServerError,
+                                ContentType::TextPlain,
+                                "",
+                            )
+                        }
+                    }
+                } else {
+                    let contents = fs::read(&file_path);
+                    match contents {
+                        Ok(bytes) => {
+                            let content_type = if req_path_parts[1].ends_with(".html") {
+                                ContentType::TextHtml
+                            } else {
+                                ContentType::ApplicationOctetStream
+                            };
+
+                            let body = String::from_utf8_lossy(&bytes)
+                                .trim_end_matches('\n')
+                                .to_string();
+                            Response::new(StatusCode::Ok, content_type, &body)
+                        }
+                        Err(e) => {
+                            println!("err: {e}");
+                            Response::new(StatusCode::NotFound, ContentType::TextPlain, "")
                         }
                     }
                 }
             }
-            _ => {
-                status_code = 404;
-                reason_phrase = "Not Found";
-            }
         }
+        _ => Response::new(StatusCode::NotFound, ContentType::TextPlain, ""),
     }
-    // println!("{}", requested_path_parts[0]);
-    let http_version = "HTTP/1.1";
-
-    let resp_content_len = if resp_body.is_empty() {
-        0
-    } else {
-        resp_body.len()
-    };
-
-    let response = format!(
-        "{} {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n{}",
-        http_version, status_code, reason_phrase, resp_content_kind, resp_content_len, resp_body
-    );
-
-    let _ = _stream.write(response.as_bytes());
 }
