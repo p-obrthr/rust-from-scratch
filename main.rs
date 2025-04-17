@@ -1,15 +1,13 @@
-mod lib;
 mod response;
 mod statuscode;
+mod threadpool;
 
-use crate::lib::ThreadPool;
-use crate::response::{ContentType, Response};
+use crate::response::{AcceptEncoding, ContentType, Response};
 use crate::statuscode::StatusCode;
+use crate::threadpool::ThreadPool;
 use std::fs;
-use std::io::Read;
-use std::io::Write;
-use std::net::TcpListener;
-use std::net::TcpStream;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 
 fn main() {
     let port = 4221;
@@ -62,6 +60,7 @@ fn handle_connection(mut _stream: TcpStream) {
     let mut accept = String::new();
     let mut req_content_type = String::new();
     let mut req_content_len: usize = 0;
+    let mut accept_encoding: Vec<String> = Vec::new();
 
     parse_headers(
         &header_parts,
@@ -70,6 +69,7 @@ fn handle_connection(mut _stream: TcpStream) {
         &mut accept,
         &mut req_content_type,
         &mut req_content_len,
+        &mut accept_encoding,
     );
 
     let response = process_request(
@@ -78,9 +78,11 @@ fn handle_connection(mut _stream: TcpStream) {
         &user_agent_kind,
         req_body,
         directory,
+        accept_encoding,
     );
 
-    let _ = _stream.write(response.format_string().as_bytes());
+    let response_bytes = response.format_bytes();
+    let _ = _stream.write(&response_bytes);
 }
 
 fn parse_headers(
@@ -90,24 +92,31 @@ fn parse_headers(
     accept: &mut String,
     req_content_type: &mut String,
     req_content_len: &mut usize,
+    accept_encoding: &mut Vec<String>,
 ) {
     for part in header_parts {
-        let headers = part.split(" ").collect::<Vec<&str>>();
+        let headers = part.split(": ").collect::<Vec<&str>>();
         match headers[0].to_lowercase().as_str() {
-            "host:" => {
+            "host" => {
                 *host = headers[1].to_string();
             }
-            "user-agent:" => {
+            "user-agent" => {
                 *user_agent_kind = headers[1].to_string();
             }
-            "accept:" => {
+            "accept" => {
                 *accept = headers[1].to_string();
             }
-            "content-type:" => {
+            "content-type" => {
                 *req_content_type = headers[1].to_string();
             }
-            "content-length:" => {
+            "content-length" => {
                 *req_content_len = headers[1].parse::<usize>().unwrap();
+            }
+            "accept-encoding" => {
+                *accept_encoding = headers[1]
+                    .split(", ")
+                    .map(|s| s.to_string())
+                    .collect::<Vec<String>>();
             }
             _ => {}
         }
@@ -120,38 +129,71 @@ fn process_request(
     user_agent: &str,
     body: &str,
     directory: &str,
+    accept_encoding: Vec<String>,
 ) -> Response {
     let req_path_parts = path.split("/").collect::<Vec<&str>>();
 
+    let mut parsed_encoding = None;
+    for encoding in &accept_encoding {
+        if encoding == "gzip" {
+            parsed_encoding = Some(AcceptEncoding::Gzip);
+            break;
+        }
+    }
+
     if req_path_parts.is_empty() {
-        return Response::new(StatusCode::Ok, ContentType::TextPlain, "");
+        return Response::new(StatusCode::Ok, parsed_encoding, ContentType::TextPlain, "");
     }
 
     match req_path_parts[0] {
         "echo" => {
             if req_path_parts.len() > 1 {
-                Response::new(StatusCode::Ok, ContentType::TextPlain, req_path_parts[1])
+                Response::new(
+                    StatusCode::Ok,
+                    parsed_encoding,
+                    ContentType::TextPlain,
+                    req_path_parts[1],
+                )
             } else {
-                Response::new(StatusCode::NotFound, ContentType::TextPlain, "")
+                Response::new(
+                    StatusCode::NotFound,
+                    parsed_encoding,
+                    ContentType::TextPlain,
+                    "",
+                )
             }
         }
-        "" => Response::new(StatusCode::Ok, ContentType::TextPlain, ""),
-        "user-agent" => Response::new(StatusCode::Ok, ContentType::TextPlain, user_agent),
+        "" => Response::new(StatusCode::Ok, parsed_encoding, ContentType::TextPlain, ""),
+        "user-agent" => Response::new(
+            StatusCode::Ok,
+            parsed_encoding,
+            ContentType::TextPlain,
+            user_agent,
+        ),
         "files" => {
             if req_path_parts.len() < 2 {
-                Response::new(StatusCode::NotFound, ContentType::TextPlain, "")
+                Response::new(
+                    StatusCode::NotFound,
+                    parsed_encoding,
+                    ContentType::TextPlain,
+                    "",
+                )
             } else {
                 let file_path = format!("{}/{}", directory, req_path_parts[1]);
                 if method == "POST" {
                     let result = fs::write(&file_path, body);
                     match result {
-                        Ok(_result) => {
-                            Response::new(StatusCode::Created, ContentType::TextPlain, "")
-                        }
+                        Ok(_result) => Response::new(
+                            StatusCode::Created,
+                            parsed_encoding,
+                            ContentType::TextPlain,
+                            "",
+                        ),
                         Err(e) => {
                             println!("err: {e}");
                             Response::new(
                                 StatusCode::InternalServerError,
+                                parsed_encoding,
                                 ContentType::TextPlain,
                                 "",
                             )
@@ -170,16 +212,26 @@ fn process_request(
                             let body = String::from_utf8_lossy(&bytes)
                                 .trim_end_matches('\n')
                                 .to_string();
-                            Response::new(StatusCode::Ok, content_type, &body)
+                            Response::new(StatusCode::Ok, parsed_encoding, content_type, &body)
                         }
                         Err(e) => {
                             println!("err: {e}");
-                            Response::new(StatusCode::NotFound, ContentType::TextPlain, "")
+                            Response::new(
+                                StatusCode::NotFound,
+                                parsed_encoding,
+                                ContentType::TextPlain,
+                                "",
+                            )
                         }
                     }
                 }
             }
         }
-        _ => Response::new(StatusCode::NotFound, ContentType::TextPlain, ""),
+        _ => Response::new(
+            StatusCode::NotFound,
+            parsed_encoding,
+            ContentType::TextPlain,
+            "",
+        ),
     }
 }
