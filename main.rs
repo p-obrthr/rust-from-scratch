@@ -39,50 +39,69 @@ fn handle_connection(mut _stream: TcpStream) {
         "."
     };
 
-    let mut buffer = [0; 256];
-    let bytes = _stream.read(&mut buffer).unwrap();
-    let request = String::from_utf8_lossy(&buffer[..bytes]);
-    // println!("{}", request);
+    loop {
+        let mut buffer = [0; 256];
+        let bytes = match _stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => {
+                println!("err while reading bytes: {}", e);
+                break;
+            }
+        };
 
-    let mut main_parts = request.splitn(2, "\r\n\r\n");
-    let headers = main_parts.next().unwrap_or("");
-    let req_body = main_parts.next().unwrap_or("");
+        let request = String::from_utf8_lossy(&buffer[..bytes]);
+        // println!("{}", request);
 
-    let header_parts = headers.split("\r\n").collect::<Vec<&str>>();
-    let req_line = header_parts[0].split(" ").collect::<Vec<&str>>();
+        let mut main_parts = request.splitn(2, "\r\n\r\n");
+        let headers = main_parts.next().unwrap_or("");
+        let req_body = main_parts.next().unwrap_or("");
 
-    let method = req_line[0];
-    let req_path = req_line[1];
-    let req_path_edited = &req_path[1..];
+        let header_parts = headers.split("\r\n").collect::<Vec<&str>>();
+        let req_line = header_parts[0].split(" ").collect::<Vec<&str>>();
 
-    let mut user_agent_kind = String::new();
-    let mut host = String::new();
-    let mut accept = String::new();
-    let mut req_content_type = String::new();
-    let mut req_content_len: usize = 0;
-    let mut accept_encoding: Vec<String> = Vec::new();
+        let method = req_line[0];
+        let req_path = req_line[1];
+        let req_path_edited = &req_path[1..];
 
-    parse_headers(
-        &header_parts,
-        &mut user_agent_kind,
-        &mut host,
-        &mut accept,
-        &mut req_content_type,
-        &mut req_content_len,
-        &mut accept_encoding,
-    );
+        let mut user_agent_kind = String::new();
+        let mut host = String::new();
+        let mut accept = String::new();
+        let mut req_content_type = String::new();
+        let mut req_content_len: usize = 0;
+        let mut accept_encoding: Vec<String> = Vec::new();
+        let mut connection = String::new();
 
-    let response = process_request(
-        method,
-        req_path_edited,
-        &user_agent_kind,
-        req_body,
-        directory,
-        accept_encoding,
-    );
+        parse_headers(
+            &header_parts,
+            &mut user_agent_kind,
+            &mut host,
+            &mut accept,
+            &mut req_content_type,
+            &mut req_content_len,
+            &mut accept_encoding,
+            &mut connection,
+        );
 
-    let response_bytes = response.format_bytes();
-    let _ = _stream.write(&response_bytes);
+        let connection_close: bool = connection.to_lowercase() == "close";
+
+        let response = process_request(
+            method,
+            req_path_edited,
+            &user_agent_kind,
+            req_body,
+            directory,
+            &accept_encoding,
+            connection_close,
+        );
+
+        let response_bytes = response.format_bytes();
+        let _ = _stream.write(&response_bytes);
+
+        if connection_close {
+            break;
+        }
+    }
 }
 
 fn parse_headers(
@@ -93,6 +112,7 @@ fn parse_headers(
     req_content_type: &mut String,
     req_content_len: &mut usize,
     accept_encoding: &mut Vec<String>,
+    connection: &mut String,
 ) {
     for part in header_parts {
         let headers = part.split(": ").collect::<Vec<&str>>();
@@ -118,6 +138,9 @@ fn parse_headers(
                     .map(|s| s.to_string())
                     .collect::<Vec<String>>();
             }
+            "connection" => {
+                *connection = headers[1].to_string();
+            }
             _ => {}
         }
     }
@@ -129,12 +152,13 @@ fn process_request(
     user_agent: &str,
     body: &str,
     directory: &str,
-    accept_encoding: Vec<String>,
+    accept_encoding: &Vec<String>,
+    connection_close: bool,
 ) -> Response {
     let req_path_parts = path.split("/").collect::<Vec<&str>>();
 
     let mut parsed_encoding = None;
-    for encoding in &accept_encoding {
+    for encoding in accept_encoding {
         if encoding == "gzip" {
             parsed_encoding = Some(AcceptEncoding::Gzip);
             break;
@@ -142,7 +166,13 @@ fn process_request(
     }
 
     if req_path_parts.is_empty() {
-        return Response::new(StatusCode::Ok, parsed_encoding, ContentType::TextPlain, "");
+        return Response::new(
+            StatusCode::Ok,
+            parsed_encoding,
+            ContentType::TextPlain,
+            "",
+            connection_close,
+        );
     }
 
     match req_path_parts[0] {
@@ -153,6 +183,7 @@ fn process_request(
                     parsed_encoding,
                     ContentType::TextPlain,
                     req_path_parts[1],
+                    connection_close,
                 )
             } else {
                 Response::new(
@@ -160,15 +191,23 @@ fn process_request(
                     parsed_encoding,
                     ContentType::TextPlain,
                     "",
+                    connection_close,
                 )
             }
         }
-        "" => Response::new(StatusCode::Ok, parsed_encoding, ContentType::TextPlain, ""),
+        "" => Response::new(
+            StatusCode::Ok,
+            parsed_encoding,
+            ContentType::TextPlain,
+            "",
+            connection_close,
+        ),
         "user-agent" => Response::new(
             StatusCode::Ok,
             parsed_encoding,
             ContentType::TextPlain,
             user_agent,
+            connection_close,
         ),
         "files" => {
             if req_path_parts.len() < 2 {
@@ -177,6 +216,7 @@ fn process_request(
                     parsed_encoding,
                     ContentType::TextPlain,
                     "",
+                    connection_close,
                 )
             } else {
                 let file_path = format!("{}/{}", directory, req_path_parts[1]);
@@ -188,6 +228,7 @@ fn process_request(
                             parsed_encoding,
                             ContentType::TextPlain,
                             "",
+                            connection_close,
                         ),
                         Err(e) => {
                             println!("err: {e}");
@@ -196,6 +237,7 @@ fn process_request(
                                 parsed_encoding,
                                 ContentType::TextPlain,
                                 "",
+                                connection_close,
                             )
                         }
                     }
@@ -212,7 +254,13 @@ fn process_request(
                             let body = String::from_utf8_lossy(&bytes)
                                 .trim_end_matches('\n')
                                 .to_string();
-                            Response::new(StatusCode::Ok, parsed_encoding, content_type, &body)
+                            Response::new(
+                                StatusCode::Ok,
+                                parsed_encoding,
+                                content_type,
+                                &body,
+                                connection_close,
+                            )
                         }
                         Err(e) => {
                             println!("err: {e}");
@@ -221,6 +269,7 @@ fn process_request(
                                 parsed_encoding,
                                 ContentType::TextPlain,
                                 "",
+                                connection_close,
                             )
                         }
                     }
@@ -232,6 +281,7 @@ fn process_request(
             parsed_encoding,
             ContentType::TextPlain,
             "",
+            connection_close,
         ),
     }
 }

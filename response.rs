@@ -7,6 +7,7 @@ pub struct Response {
     content_type: ContentType,
     accept_encoding: Option<AcceptEncoding>,
     body: Vec<u8>,
+    connection_close: bool,
 }
 
 impl Response {
@@ -15,6 +16,7 @@ impl Response {
         accept_encoding: Option<AcceptEncoding>,
         content_type: ContentType,
         body: &str,
+        connection_close: bool,
     ) -> Self {
         let compressed_body = match accept_encoding {
             Some(AcceptEncoding::Gzip) => match AcceptEncoding::compress_gzip(body) {
@@ -32,6 +34,7 @@ impl Response {
             accept_encoding,
             content_type,
             body: compressed_body,
+            connection_close,
         }
     }
 
@@ -50,10 +53,16 @@ impl Response {
         }
 
         headers.push_str(&format!(
-            "Content-Type: {}\r\nContent-Length: {}\r\n\r\n",
+            "Content-Type: {}\r\nContent-Length: {}\r\n",
             self.content_type.str(),
             content_length
         ));
+
+        if self.connection_close {
+            headers.push_str("Connection: Close\r\n");
+        }
+
+        headers.push_str("\r\n");
 
         let mut response_bytes = headers.into_bytes();
         response_bytes.extend(&self.body);
