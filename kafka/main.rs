@@ -1,3 +1,6 @@
+mod threadpool;
+
+use crate::threadpool::ThreadPool;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
@@ -5,11 +8,15 @@ fn main() {
     let listener = TcpListener::bind("127.0.0.1:9092").unwrap();
     println!("listening on 9092..");
 
+    let pool = ThreadPool::new(4);
+
     for stream in listener.incoming() {
         match stream {
-            Ok(mut stream) => {
-                println!("accepted new connection");
-                handle_connection(&mut stream);
+            Ok(mut _stream) => {
+                pool.execute(move || {
+                    println!("accepted new connection");
+                    handle_connection(_stream);
+                });
             }
             Err(e) => {
                 println!("error: {}", e);
@@ -18,10 +25,12 @@ fn main() {
     }
 }
 
-fn handle_connection(stream: &mut TcpStream) {
-    let header = parse_header(stream);
-    let response = create_response(&header);
-    send_response(stream, &response);
+fn handle_connection(mut stream: TcpStream) {
+    loop {
+        let header = parse_header(&mut stream);
+        let response = create_response(&header);
+        send_response(&mut stream, &response);
+    }
 }
 
 struct Request {
