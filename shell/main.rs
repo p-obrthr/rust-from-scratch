@@ -40,6 +40,8 @@ fn execute(cmd: &str, args: &[&str]) {
         "echo" => execute_echo(args),
         "exit" => execute_exit(args),
         "type" => execute_type(args, BUILT_INS),
+        "pwd" => execute_pwd(),
+        "cd" => execute_cd(args),
         _ => {
             if !execute_external(cmd, args) {
                 handle_not_found(cmd);
@@ -62,7 +64,7 @@ fn execute_exit(args: &[&str]) {
     process::exit(exit_code);
 }
 
-const BUILT_INS: &[&str] = &["echo", "exit", "type"];
+const BUILT_INS: &[&str] = &["echo", "exit", "type", "pwd", "cd"];
 
 fn execute_type(args: &[&str], built_ins: &[&str]) {
     let cmd = args[0];
@@ -76,6 +78,27 @@ fn execute_type(args: &[&str], built_ins: &[&str]) {
         println!("{} is {}", cmd, path.display());
     } else {
         println!("{}: not found", cmd);
+    }
+}
+
+fn execute_pwd() {
+    match env::current_dir() {
+        Ok(path) => println!("{}", path.display()),
+        Err(e) => eprintln!("Err getting current dir: {}", e),
+    }
+}
+
+fn execute_cd(args: &[&str]) {
+    let target = if args[0] == "~" {
+        env::var("HOME").unwrap_or_else(|_| String::from("/"))
+    } else {
+        args[0].to_string()
+    };
+
+    let path = Path::new(&target);
+
+    if let Err(_) = env::set_current_dir(path) {
+        eprintln!("cd: {}: No such file or directory", target);
     }
 }
 
