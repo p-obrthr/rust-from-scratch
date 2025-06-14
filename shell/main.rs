@@ -16,7 +16,7 @@ fn main() {
         };
 
         if let Some((cmd, args)) = parse_input(&input) {
-            execute(cmd, &args);
+            execute(&cmd, &args);
         }
     }
 }
@@ -30,20 +30,92 @@ fn read_input() -> io::Result<String> {
     Ok(input)
 }
 
-fn parse_input(input: &str) -> Option<(&str, Vec<&str>)> {
-    let mut parts = input.trim().split_whitespace();
-    parts.next().map(|cmd| (cmd, parts.collect()))
+fn parse_input(input: &str) -> Option<(String, Vec<String>)> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    let mut single_quote_mode = false;
+    let mut double_quote_mode = false;
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                if single_quote_mode {
+                    current.push('\\');
+                } else if let Some(next_char) = chars.next() {
+                    if double_quote_mode {
+                        match next_char {
+                            '\\' | '"' | '$' | '`' => current.push(next_char),
+                            _ => {
+                                current.push('\\');
+                                current.push(next_char);
+                            }
+                        }
+                    } else {
+                        current.push(next_char);
+                    }
+                }
+            }
+
+            '\'' => {
+                if !double_quote_mode {
+                    single_quote_mode = !single_quote_mode;
+                } else {
+                    current.push(c);
+                }
+            }
+
+            '"' => {
+                if !single_quote_mode {
+                    double_quote_mode = !double_quote_mode;
+                } else {
+                    current.push(c);
+                }
+            }
+
+            c if c.is_whitespace() && !single_quote_mode && !double_quote_mode => {
+                if !current.is_empty() {
+                    args.push(current.clone());
+                    current.clear();
+                }
+                while let Some(next) = chars.peek() {
+                    if next.is_whitespace() {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            _ => {
+                current.push(c);
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        args.push(current);
+    }
+
+    if args.is_empty() {
+        None
+    } else {
+        let cmd = args.remove(0);
+        Some((cmd, args))
+    }
 }
 
-fn execute(cmd: &str, args: &[&str]) {
+fn execute(cmd: &str, args: &[String]) {
+    let args_str: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
     match cmd {
-        "echo" => execute_echo(args),
-        "exit" => execute_exit(args),
-        "type" => execute_type(args, BUILT_INS),
+        "echo" => execute_echo(&args_str),
+        "exit" => execute_exit(&args_str),
+        "type" => execute_type(&args_str, BUILT_INS),
         "pwd" => execute_pwd(),
-        "cd" => execute_cd(args),
+        "cd" => execute_cd(&args_str),
         _ => {
-            if !execute_external(cmd, args) {
+            if !execute_external(cmd, &args_str) {
                 handle_not_found(cmd);
             }
         }
